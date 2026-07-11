@@ -1,0 +1,32 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+**/__pycache__/
+backend/*.pyc
+backend/tracker.db
+backend/uploads/
+backend/.env
+
+# Data — large files, not tracked in git
+backend/raw_data/
+backend/curated_data/
+
+# Model weights — large binaries, use MLflow or model registry instead
+backend/model_output/*.pth
+
+# Training results are tracked (small JSON, useful for history)
+# backend/model_output/training_results.json  ← keep this
+# backend/model_output/evaluation_report.json ← keep this
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+
+# Misc
+submission.csv
+submission_pnl_rule.csv
+.claude/
