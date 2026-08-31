@@ -2,7 +2,6 @@
 
 A full-stack web app that detects AI-generated images using a multi-signal detection pipeline — combining a fine-tuned Vision Transformer, frequency domain analysis, metadata forensics, and a Claude AI forensic agent.
 
-**Author:** Nikhil Ahlawat
 
 ---
 
