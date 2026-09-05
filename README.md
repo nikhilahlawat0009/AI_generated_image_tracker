@@ -1,100 +1,54 @@
 # AI Generated Image Tracker
 
-A full-stack web app that detects AI-generated images using a multi-signal detection pipeline — combining a fine-tuned Vision Transformer, frequency domain analysis, metadata forensics, and a Claude AI forensic agent.
+Upload a picture and this tells you whether a machine made it, and why it thinks so.
 
+It is a web app with a Python backend, and the part I find interesting is that it refuses to trust any single method. Three separate checks run on every image, each gets a vote, and a Claude vision agent writes up the conclusion in language you would actually say out loud.
 
----
+## Why three checks instead of one
 
-## What it does
+Any single detector can be fooled. A model that has only ever seen Stable Diffusion images will be confidently wrong the first time you show it something from a newer generator. So rather than one opinion there are three, and they look for completely different things.
 
-Upload any image and the system tells you:
-- Whether it is AI-generated or a real photograph
-- Confidence score (0–100%)
-- Which signals triggered (spectral artifacts, missing EXIF, generator signatures)
-- A detailed forensic report written by a Claude vision agent
+**The trained model** takes in the whole frame at once. This is a Vision Transformer, and that choice matters here. AI images tend to go wrong globally rather than in one spot: hands with an extra finger, light arriving from two directions at the same time, a reflection that does not match what is in front of it. Those are relationships across the entire picture, so a model that looks everywhere simultaneously catches them better than one sliding a small window around.
 
----
+**The frequency check** ignores the picture completely and looks at its mathematical fingerprint. Generators leave behind faint regular patterns that cameras never produce, a kind of graph paper texture that is invisible to you and obvious once the image is transformed.
 
-## Architecture
+**The metadata check** just reads the file. Real photographs usually carry a trail: which camera, what shutter speed, when it was taken. Generated images turn up with that trail missing, and a surprising number of them politely embed the name of the tool that made them.
 
-```
-frontend/          React + Vite + TailwindCSS
-backend/
-  main.py          FastAPI — image upload, analysis endpoint, history
-  detectors/
-    model_detector.py      Fine-tuned ViT-B/16 classifier
-    frequency_analyzer.py  FFT spectral artifact detection
-    metadata_analyzer.py   EXIF and PNG chunk forensics
-    ensemble.py            Weighted scoring → verdict
-  agents/
-    provenance_agent.py    Claude vision agent — forensic report
-  data_pipeline/
-    download_dataset.py    CIFAKE dataset downloader (HuggingFace streaming)
-    dataset_curator.py     Stratified split, deduplication, leakage check
-  training/
-    finetune_vit.py        Transfer learning fine-tuning script
-    evaluate.py            Precision, recall, AUC-ROC evaluation
-  db/
-    database.py            SQLite persistence for analysis history
-```
+Their votes are weighted into a single answer. When the three disagree strongly the app says it is unsure instead of picking a side, which seemed more honest than a confident coin flip.
 
----
+## How well it does
 
-## ML Pipeline
+Tested on 1,500 images it had never seen before:
 
-### Dataset
-- **CIFAKE** (Bird & Lotfi, 2023) — 60k real CIFAR-10 photographs + 60k Stable Diffusion equivalents
-- Downloaded 10,000 images (5,000 per class) via HuggingFace streaming
-- Deduplicated using MD5 hashing — removed 7 duplicate AI images
-- Stratified 70/15/15 split → 6,995 train / 1,498 val / 1,500 test
-- Leakage verification: zero overlap between splits confirmed
-
-### Model
-- **Architecture:** ViT-B/16 (Vision Transformer, 86M parameters)
-- **Training:** Transfer learning — froze first 10 of 12 transformer blocks, fine-tuned last 2 + classification head (16.5% of parameters trainable)
-- **Why ViT over CNN:** AI generation artifacts are often global (anatomically inconsistent hands, incoherent lighting). ViT's self-attention attends to the full image simultaneously, catching long-range inconsistencies that CNN convolution misses.
-- **Hardware:** Apple Silicon GPU (MPS), 5 epochs, ~25 minutes
-
-### Results
-
-| Metric | Score |
+| | |
 |---|---|
-| Accuracy | 96.4% |
-| Precision | 96.3% |
-| Recall | 96.5% |
-| F1 Score | 96.4% |
-| AUC-ROC | **0.9918** |
+| Correct verdicts | 96.4% |
+| AI images caught | 96.5% |
+| Real photos wrongly flagged | 28 out of 750 |
+| AUC-ROC | 0.9918 |
 
-Confusion matrix on 1,500 held-out test images:
-- 724 AI images correctly detected
-- 26 AI images missed (false negatives)
-- 28 real images falsely flagged (false positives)
-- 722 real images correctly passed
+The false positives are the ones worth caring about. Telling someone their own photograph is fake is a worse failure than missing a generated one, so that number is the one to keep pushing down.
 
-### Detection signals (ensemble)
+## What it is built from
 
-| Detector | Weight | Method |
-|---|---|---|
-| Fine-tuned ViT | 50% | Neural classifier trained on CIFAKE |
-| Frequency analysis | 25% | FFT spectral flatness, 1/f noise slope, GAN grid peaks |
-| Metadata forensics | 25% | EXIF absence, PNG tEXt chunk AI signatures |
+The training data started as CIFAKE, a published dataset of 60,000 real photographs paired with 60,000 Stable Diffusion equivalents. That was a good start and a narrow one, since it teaches the model exactly one generator. The pipeline in `data_pipeline/` now pulls from several sources and merges them into a single balanced pool of about 40,000 images, keeping a note of where each one came from. Adding a new generator means adding one entry to `registry.py`, not writing new download code.
 
----
+Training freezes most of the network and fine-tunes only the last two transformer blocks plus the classifier, which is roughly a sixth of the parameters. About 25 minutes on an Apple Silicon laptop. There is a `--resume` flag for continuing from an existing checkpoint when new data arrives, rather than starting again from nothing.
 
-## Running locally
+## Running it
 
-### Backend
+Backend:
 
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env           # add your ANTHROPIC_API_KEY
+cp .env.example .env
 uvicorn main:app --reload
 ```
 
-### Frontend
+Put your Anthropic key in `.env`. Frontend:
 
 ```bash
 cd frontend
@@ -102,37 +56,34 @@ npm install
 npm run dev
 ```
 
-Or use the start script (starts both):
-```bash
-./start.sh
-```
+Or `./start.sh` to bring up both, then open http://localhost:5173.
 
-Open http://localhost:5173
-
-### Reproducing the ML pipeline
+## Rebuilding the model yourself
 
 ```bash
 cd backend
-
-# 1. Download dataset
-pip install datasets Pillow torch torchvision scikit-learn
-python3 data_pipeline/download_dataset.py --output ./raw_data --samples 5000
-
-# 2. Curate and split
-python3 data_pipeline/dataset_curator.py ./raw_data ./curated_data
-
-# 3. Fine-tune ViT
-python3 training/finetune_vit.py --data ./curated_data --output ./model_output --epochs 5
-
-# 4. Evaluate
-python3 training/evaluate.py --data ./curated_data --model ./model_output/best_model.pth
+python3 data_pipeline/download_all.py      # pull every source in registry.py
+python3 data_pipeline/merge_datasets.py    # combine into one pool
+python3 data_pipeline/dataset_curator.py ./merged_data ./curated_data_v2
+python3 training/finetune_vit.py --data ./curated_data_v2 --epochs 5
+python3 training/evaluate.py --data ./curated_data_v2 --model ./model_output_v2/best_model.pth
 ```
 
----
+The curator deduplicates by hash and splits 70/15/15, then checks that no image ended up in more than one split. Leakage between train and test is the quiet way to end up with a number that looks excellent and means nothing.
 
-## Tech stack
+## Layout
 
-- **Backend:** Python, FastAPI, PyTorch, HuggingFace Transformers, scikit-learn, SQLAlchemy
-- **Frontend:** React, TypeScript, Vite, TailwindCSS, Recharts
-- **AI Agent:** Anthropic Claude (vision + tool use)
-- **Dataset:** CIFAKE — Bird & Lotfi, 2023
+```
+frontend/                React, Vite, Tailwind
+backend/
+  main.py                FastAPI: upload, analyse, history
+  detectors/             the three checks, plus the weighting that combines them
+  agents/                the Claude vision agent that writes the report
+  data_pipeline/         downloading, merging, curating, splitting
+  training/              fine-tuning and evaluation
+  db/                    SQLite, for keeping past analyses
+```
+
+## Honest limitations
+
+The model has seen a handful of generators, not all of them, and new ones appear constantly. Metadata is trivial to strip or fake, so that check helps and cannot be leaned on. The frequency check gets weaker once an image has been through screenshotting, resizing, or a social media pipeline, all of which scrub exactly the artefacts it hunts for. Treat the verdict as good evidence rather than proof.
