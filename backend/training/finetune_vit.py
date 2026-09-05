@@ -39,15 +39,34 @@ WHAT WE FREEZE AND WHY:
   This is a key design decision. We unfreeze the last 2 transformer blocks
   as a middle ground — they contain the most task-specific representations.
 
-RUN:
-  pip3 install torch torchvision tqdm
+RUN (from scratch):
   python3 training/finetune_vit.py --data ./curated_data --epochs 5
+
+RUN (resume from existing checkpoint on new data):
+  python3 training/finetune_vit.py --data ./curated_data_v2 --epochs 3 \
+    --resume ./model_output/best_model.pth
+
+WHY RESUME INSTEAD OF RETRAIN:
+  When we add new data (more generators, higher resolution), we don't throw
+  away what the model already learned. We load the existing checkpoint and
+  continue training on the expanded dataset.
+
+  This is called CONTINUAL LEARNING or INCREMENTAL FINE-TUNING.
+  Benefits:
+  - Saves 25+ minutes of training time
+  - Preserves knowledge about SD v1.4 artifacts while adding new generator knowledge
+  - Lower learning rate when resuming avoids overwriting what's already learned
+
+  The risk to watch for: CATASTROPHIC FORGETTING — if the new data is very
+  different from the original, the model may "forget" old patterns. Monitoring
+  val accuracy on old test set tells you if this is happening.
 """
 
 import argparse
 import json
 import time
 from pathlib import Path
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -266,13 +285,9 @@ def evaluate(model, loader, criterion, device) -> dict:
 
 # ─── Main training script ─────────────────────────────────────────────────────
 
-def train(data_dir: Path, output_dir: Path, epochs: int):
+def train(data_dir: Path, output_dir: Path, epochs: int, resume: Optional[Path] = None):
     torch.manual_seed(SEED)
 
-    # Device selection
-    # MPS = Apple Silicon GPU (your M-series Mac)
-    # CUDA = NVIDIA GPU
-    # CPU = fallback, slower but works
     if torch.backends.mps.is_available():
         device = torch.device("mps")
         print("Using Apple Silicon GPU (MPS)")
@@ -283,11 +298,6 @@ def train(data_dir: Path, output_dir: Path, epochs: int):
         device = torch.device("cpu")
         print("Using CPU — training will be slower (~10 min for 5 epochs)")
 
-    # Load datasets
-    # ImageFolder reads the folder structure we created in curation:
-    #   train/real/       → label 0
-    #   train/ai_generated/ → label 1
-    # The label index is assigned alphabetically — ai_generated=0, real=1
     train_ds = datasets.ImageFolder(data_dir / "train", transform=train_transform)
     val_ds   = datasets.ImageFolder(data_dir / "val",   transform=eval_transform)
     test_ds  = datasets.ImageFolder(data_dir / "test",  transform=eval_transform)
@@ -297,13 +307,11 @@ def train(data_dir: Path, output_dir: Path, epochs: int):
     print(f"  Val:   {len(val_ds)} images")
     print(f"  Test:  {len(test_ds)} images\n")
 
-    # Load class weights from the stats we computed during curation
-    stats_path = data_dir.parent / "curated_data" / "stats.json"
+    stats_path = data_dir / "stats.json"
     class_weights = None
     if stats_path.exists():
         with open(stats_path) as f:
             stats = json.load(f)
-        # Match order to class_to_idx: ai_generated=0, real=1
         w_ai   = stats["suggested_class_weight_ai"]
         w_real = stats["suggested_class_weight_real"]
         class_weights = torch.tensor([w_ai, w_real], dtype=torch.float).to(device)
@@ -316,8 +324,27 @@ def train(data_dir: Path, output_dir: Path, epochs: int):
     test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE,
                               shuffle=False, num_workers=2, pin_memory=True)
 
-    # Model
+    # Model — either fresh or resumed from checkpoint
     model = build_model(num_classes=2).to(device)
+    prior_history = []
+    lr = LEARNING_RATE
+
+    if resume is not None:
+        # Load existing checkpoint weights
+        # WHY LOWER LR ON RESUME:
+        #   The model already converged on the old data. A full learning rate
+        #   would overwrite those weights too aggressively — the model would
+        #   "forget" what it learned from the original generators.
+        #   Using 1/5 of the original LR lets it incorporate new patterns
+        #   while preserving old ones. This is the standard practice for
+        #   incremental fine-tuning.
+        checkpoint = torch.load(resume, map_location=device)
+        model.load_state_dict(checkpoint["model_state"])
+        lr = LEARNING_RATE / 5
+        prior_history = checkpoint.get("history", [])
+        print(f"Resumed from: {resume}")
+        print(f"  Previous best val_acc: {checkpoint.get('val_accuracy', '?'):.3f}")
+        print(f"  Learning rate reduced to {lr} (1/5 of original) to avoid catastrophic forgetting\n")
 
     # Loss function with class weights
     # WHY CrossEntropyLoss: standard for multi-class classification.
@@ -335,7 +362,7 @@ def train(data_dir: Path, output_dir: Path, epochs: int):
     # We only pass TRAINABLE parameters — frozen ones don't need an optimizer.
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=LEARNING_RATE,
+        lr=lr,
         weight_decay=1e-4,
     )
 
@@ -379,11 +406,13 @@ def train(data_dir: Path, output_dir: Path, epochs: int):
                 "model_state":    model.state_dict(),
                 "val_accuracy":   best_val_acc,
                 "class_to_idx":   train_ds.class_to_idx,
+                "history":        prior_history + history,
                 "hyperparams": {
-                    "lr":         LEARNING_RATE,
+                    "lr":         lr,
                     "batch_size": BATCH_SIZE,
                     "image_size": IMAGE_SIZE,
                     "model":      "vit_b_16",
+                    "resumed_from": str(resume) if resume else None,
                 },
             }, best_model_path)
             print(f"  ✓ New best model saved (val_acc={best_val_acc:.3f})")
@@ -411,7 +440,7 @@ def train(data_dir: Path, output_dir: Path, epochs: int):
 
     # Save all results for the evaluation dashboard (Step 4)
     results = {
-        "history":       history,
+        "history":       prior_history + history,
         "test_accuracy": test_metrics["accuracy"],
         "test_probs":    test_metrics["probs"],
         "test_labels":   test_metrics["labels"],
@@ -435,6 +464,9 @@ if __name__ == "__main__":
                         help="Where to save model and results")
     parser.add_argument("--epochs", type=int, default=5,
                         help="Number of training epochs")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to existing checkpoint to resume from (incremental training)")
     args = parser.parse_args()
 
-    train(Path(args.data), Path(args.output), args.epochs)
+    train(Path(args.data), Path(args.output), args.epochs,
+          resume=Path(args.resume) if args.resume else None)

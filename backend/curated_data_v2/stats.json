@@ -1,0 +1,14 @@
+{
+  "total_images": 39978,
+  "real_count": 19989,
+  "ai_count": 19989,
+  "imbalance_ratio": 1.0,
+  "train_real": 13992,
+  "train_ai": 13992,
+  "val_real": 2998,
+  "val_ai": 2998,
+  "test_real": 2999,
+  "test_ai": 2999,
+  "suggested_class_weight_real": 1.0,
+  "suggested_class_weight_ai": 1.0
+}

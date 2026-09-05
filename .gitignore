@@ -14,6 +14,13 @@ backend/curated_data/
 
 # Model weights — large binaries, use MLflow or model registry instead
 backend/model_output/*.pth
+backend/model_output_v2/*.pth
+
+# v2 dataset — same policy as v1: images stay out, stats JSON is tracked
+backend/curated_data_v2/*
+!backend/curated_data_v2/stats.json
+backend/merged_data/
+backend/raw_data_v2/
 
 # Training results are tracked (small JSON, useful for history)
 # backend/model_output/training_results.json  ← keep this
